@@ -4,8 +4,13 @@ This repository contains practice code for various scientific machine learning l
 
 ## Table of Contents
 
-- [heat_1d_deepxde.ipynb](heat_1d_deepxde.ipynb): Solving an inverse problem for the 1D heat equation using DeepXDE.
-- [wave_1d_deepxde.ipynb](wave_1d_deepxde.ipynb): Solving the 1D wave equation using DeepXDE.
+### 1D Differential Equation PINNs
+- [1d_diffeq_pinn/heat_1d_deepxde.ipynb](1d_diffeq_pinn/heat_1d_deepxde.ipynb): Solving an inverse problem for the 1D heat equation using DeepXDE.
+- [1d_diffeq_pinn/wave_1d_deepxde.ipynb](1d_diffeq_pinn/wave_1d_deepxde.ipynb): Solving the 1D wave equation using DeepXDE.
+
+### Blood Flow Simulations
+- [blood-flow/vessel_geometries.py](blood-flow/vessel_geometries.py): Generates emulated vessel geometry data for DeepONet branch inputs.
+- [blood-flow/main.py](blood-flow/main.py): DeepONet model implementation using DeepXDE for neural operators on blood vessel geometries and Navier-Stokes flows.
 
 ## Setup
 

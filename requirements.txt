@@ -13,3 +13,4 @@ ipykernel>=6.20
 scikit-learn>=1.2
 jax>=0.4.20
 jaxlib>=0.4.20
+h5py>=3.8
