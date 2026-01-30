@@ -20,6 +20,7 @@ def visualize_vessel(vessel_path, num_samples=1):
 
     # display random indicies
     indices = np.random.choice(geometries.shape[0], num_samples, replace=False)
+    # indices = [199] # use this to choose specific sample
     for i, idx in enumerate(indices):
         A0 = geometries[idx]
         
