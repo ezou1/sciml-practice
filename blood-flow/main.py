@@ -61,17 +61,6 @@ x_grid = np.linspace(0, 0.1, m_points).reshape(-1, 1)  # spatial domain
 t_grid = np.linspace(0, 1.0, 100).reshape(-1, 1)  # time domain
 # trunk is the combination of x and t points
 trunk_input = np.vstack([np.append(x, t) for x in x_grid for t in t_grid])
-
-# define the DeepONet model
-net = dde.nn.DeepONet(
-    [m_points, 128, 128],  # branch input shape
-    [2, 128, 128],         # trunk input shape (2 because x and t)
-    "tanh",
-    "Glorot normal"
-)
-
-eval_pts = np.linspace(0, 0.1, m_points).reshape(-1, 1) # evaluation points at which A0 was sampled
-
 """
 # pde operator
 pde_op = dde.data.PDEOperatorCartesianProd(
