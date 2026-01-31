@@ -209,3 +209,4 @@ __marimo__/
 # ML related stuff
 *.h5cache
 *.npy
+*.pt
