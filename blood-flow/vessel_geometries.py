@@ -9,7 +9,7 @@ def generate_vessel_geometries(num_samples, m_points=100, length=0.1):
 
     for i in range(num_samples):
         # randomly generate vessel cross section profile
-        base_area = 0.8 # units??? cm^2
+        base_area = 0.8 # units??? cm^2, note also that this corresponds with A0 in main.py
         A0 = np.ones_like(x) * base_area # baseline area at equilibrium
 
         # add stenosis narrowing

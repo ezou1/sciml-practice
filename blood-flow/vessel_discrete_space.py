@@ -56,4 +56,4 @@ class VesselDiscreteSpace(dde.data.function_spaces.FunctionSpace):
         f = interp1d(self.grid_points, features, kind='cubic', axis=1, 
                      bounds_error=False, fill_value="extrapolate")
         
-        return f(x_eval).astype(np.float32)
+        return f(x_eval).astype(np.float64) # match with main
