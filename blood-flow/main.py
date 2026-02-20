@@ -1,8 +1,26 @@
 import deepxde as dde
 import numpy as np
 import torch
+import torch.nn.functional as F
 from scipy.interpolate import interp1d
 from vessel_discrete_space import VesselDiscreteSpace
+
+
+# ---- Custom OperatorBC that forwards aux_var (branch function) to the BC ----
+# DeepXDE's built-in OperatorBC passes X (raw coordinates) as the 3rd argument
+# to the user function, silently ignoring aux_var. In PI-DeepONet, the BC
+# functions need the branch input (e.g., vessel geometry A0), which is carried
+# in aux_var.  This subclass forwards it correctly.
+class AuxOperatorBC(dde.icbc.OperatorBC):
+    """OperatorBC that passes auxiliary variables (branch function values)
+    instead of raw spatial coordinates to the user-provided function.
+
+    func signature: func(inputs, outputs, aux_var) -> residual
+    """
+
+    def error(self, X, inputs, outputs, beg, end, aux_var=None):
+        return self.func(inputs, outputs, aux_var)[beg:end]
+
 
 dde.config.set_default_float("float64")
 
@@ -55,43 +73,51 @@ R_out = 0.5 # Dimensionless resistance
 
 
 # define PDE residuals
-def pde_residuals(x, y, aux): # x is (x, t), y is predicted q and A, aux is branch function A0, through interpolation
-    A_hat = torch.clamp(y[:, 0:1], min=1e-6)  # non-dimensional cross-sectional area
-    q_hat = y[:, 1:2]  # non-dimensional flow rate
+def pde_residuals(x, y, aux):
+    # x: (x_hat, t_hat) trunk coordinates
+    # y: raw network output (2 columns)
+    # aux: branch function A0 evaluated at trunk points (dimensional, cm^2)
 
-    # aux comes from the function space (raw A0 in cm^2), normalize it here
-    A0_hat = aux / A_ref  # baseline area from branch function space, now non-dimensional
+    raw_A = y[:, 0:1]
+    q_hat = y[:, 1:2]
 
-    # compute derivatives (all w.r.t. non-dimensional x_hat, t_hat)
-    dq_dxh = dde.grad.jacobian(y, x, i=1, j=0)
-    dA_dth = dde.grad.jacobian(y, x, i=0, j=1)
-    dq_dth = dde.grad.jacobian(y, x, i=1, j=1)
+    # Softplus reparameterization: A_hat > 0.1 always
+    A_hat = F.softplus(raw_A) + 0.1
 
-    # State equation using SCALED constants
+    # Normalize branch input (aux is from scipy interpolation, no grad w.r.t. x)
+    A0_hat = aux / A_ref
+
+    # --- First-order derivatives only (no nested autograd) ---
+    ones = torch.ones_like(A_hat)
+
+    grads_A = torch.autograd.grad(A_hat, x, grad_outputs=ones, create_graph=True)[0]
+    dA_dx = grads_A[:, 0:1]
+    dA_dt = grads_A[:, 1:2]
+
+    grads_q = torch.autograd.grad(q_hat, x, grad_outputs=ones, create_graph=True)[0]
+    dq_dx = grads_q[:, 0:1]
+    dq_dt = grads_q[:, 1:2]
+
+    # 1. Continuity: dA/dt + dq/dx = 0
+    continuity_res = dq_dx + dA_dt
+
+    # 2. Momentum (expanded analytically to avoid nested autograd):
+    #
+    #    d(q^2/A)/dx  =  2*q*dq_dx / A  -  q^2 * dA_dx / A^2
+    dflux_dx = (2.0 * q_hat * dq_dx) / A_hat - (q_hat ** 2 * dA_dx) / (A_hat ** 2)
+
+    #    A * dp/dx  =  beta * sqrt(A0) / (2*sqrt(A)) * dA_dx
+    #    (A0 and beta are not tracked through autograd, so dp/dx only
+    #     has the A_hat dependency.  This avoids autograd on p_hat.)
     r0_hat = torch.sqrt(A0_hat / np.pi)
-    # beta_hat is dimensionless: (4/3) * (E/p_ref) * (h0/L_ref) / r0_hat
     beta_hat = (4.0 / 3.0) * (E_hat * h0_hat / r0_hat)
-    p_hat = beta_hat * (1.0 - torch.sqrt(A0_hat / A_hat))
-    dp_dxh = dde.grad.jacobian(p_hat, x, i=0, j=0)
+    pressure_grad_term = beta_hat * torch.sqrt(A0_hat) / (2.0 * torch.sqrt(A_hat)) * dA_dx
 
-    # 1. Continuity equation (non-dimensional):
-    #    dA_hat/dt_hat + dq_hat/dx_hat = 0
-    continuity_res = dq_dxh + dA_dth
-
-    # 2. Momentum equation (non-dimensional):
-    #    dq_hat/dt_hat + d(q_hat^2/A_hat)/dx_hat + A_hat * dp_hat/dx_hat = friction
-    #    Note: rho is already absorbed into p_ref = rho * u_ref^2, so the
-    #    pressure gradient term is just A_hat * dp_hat/dx_hat (no rho division).
-    flux = (q_hat ** 2) / A_hat
-    dflux_dx = dde.grad.jacobian(flux, x, i=0, j=0)
-
-    # Friction term (non-dimensional):
-    #   friction_coeff * (r_hat * q_hat / A_hat)
-    #   where friction_coeff = 2*pi*nu*L_ref / (u_ref*delta)
+    #    Friction term
     r_hat = torch.sqrt(A_hat / np.pi)
     friction = -friction_coeff * (r_hat * q_hat / A_hat)
 
-    momentum_residual = dq_dth + dflux_dx + A_hat * dp_dxh - friction
+    momentum_residual = dq_dt + dflux_dx + pressure_grad_term - friction
 
     return [continuity_res, momentum_residual]
 
@@ -130,10 +156,9 @@ def ic_A_residual(x, y, aux):
     if not torch.is_tensor(aux):
         aux = torch.tensor(aux, dtype=y.dtype, device=y.device)
     
-    # y[:, 0] is A_hat (non-dimensional)
-    A_hat = torch.clamp(y[:, 0:1], min=1e-6)
-    # aux is the raw A0 from function space (dimensional, cm^2)
-    A0_hat = aux / A_ref  # normalize to match A_hat's scale
+    # Same softplus transform as in pde_residuals (must be consistent!)
+    A_hat = F.softplus(y[:, 0:1]) + 0.1
+    A0_hat = aux / A_ref
     
     # IC: A_hat = A0_hat at t=0
     return A_hat - A0_hat
@@ -145,12 +170,11 @@ def outflow_residual(x, y, aux):
     if not torch.is_tensor(aux):
         aux = torch.tensor(aux, dtype=y.dtype, device=y.device)
     
-    A_hat = torch.clamp(y[:, 0:1], min=1e-6)
+    # Same softplus transform (consistent with PDE residual)
+    A_hat = F.softplus(y[:, 0:1]) + 0.1
     q_hat = y[:, 1:2]
-    # aux is raw A0 (dimensional), normalize once
     A0_hat = aux / A_ref
 
-    # Reuse global E_hat, h0_hat (already non-dimensionalized)
     r0_hat = torch.sqrt(A0_hat / np.pi)
     beta_hat = (4.0 / 3.0) * (E_hat * h0_hat / r0_hat)
     p_hat = beta_hat * (1.0 - torch.sqrt(A0_hat / A_hat))
@@ -166,7 +190,7 @@ bc_inflow = dde.icbc.DirichletBC(
     lambda x, on_boundary: on_boundary and np.isclose(x[0], 0),
     component=1 # component 1 is 'q'
 )
-bc_outflow = dde.icbc.OperatorBC(
+bc_outflow = AuxOperatorBC(
     geomtime,
     outflow_residual,
     lambda x, on_boundary: on_boundary and np.isclose(x[0], 1.0)
@@ -177,7 +201,7 @@ ic_q = dde.icbc.IC(
     lambda x, on_initial: on_initial,
     component=1 # component 1 is 'q'
 )
-ic_A = dde.icbc.OperatorBC(
+ic_A = AuxOperatorBC(
     geomtime,
     ic_A_residual,
     lambda x, on_initial: on_initial
@@ -232,16 +256,28 @@ net = dde.nn.DeepONetCartesianProd(
     multi_output_strategy="independent"
 )
 
+# Gradient clipping via per-parameter hooks.
+# This prevents any single gradient component from exploding,
+# which is critical for the stiff coupled PDE system.
+# Gradient safety: replace any NaN/Inf *before* clamping.
+# torch.clamp alone passes NaN through unchanged, so we need nan_to_num first.
+for param in net.parameters():
+    param.register_hook(
+        lambda grad: torch.clamp(
+            torch.nan_to_num(grad, nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0
+        )
+    )
+
 # define model
 model = dde.Model(pde_op, net)
 # Losses: [continuity, momentum, bc_inflow, bc_outflow, ic_q, ic_A]
-# Weight BCs/ICs higher so the network learns physical constraints first
+# ic_A raw loss is ~13 at init, so weight=1 keeps it comparable to others.
 model.compile(
     optimizer="adam", 
-    lr=1e-3,
-    loss_weights=[1, 1, 10, 10, 10, 10] # loss weights to ensure compliance with BC/IC early training
+    lr=1e-4,
+    loss_weights=[1, 1, 10, 10, 10, 1]
 )
 
 # train the model
-losshistory, train_state = model.train(iterations=20000, display_every=1000) # default 20000, 1000
+losshistory, train_state = model.train(iterations=500, display_every=100) # default 20000, 1000
 model.save("blood_flow_deeponet")
